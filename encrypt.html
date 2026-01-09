@@ -1,1 +1,139 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Encrypt Tool</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; }
+    .wrap { padding: 16px; max-width: 980px; margin: 0 auto; }
+    .card { border: 1px solid #e5e5e5; border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+    label { display:block; font-size: 13px; color:#555; margin-top: 10px; }
+    input, textarea { width: 100%; box-sizing: border-box; padding: 10px 12px; border:1px solid #ddd; border-radius:10px; }
+    textarea { min-height: 160px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; }
+    .row > div { flex: 1 1 260px; }
+    button { padding:10px 12px; border:1px solid #ddd; border-radius:10px; background:#fff; cursor:pointer; }
+    button:hover { background:#f7f7f7; }
+    .hint { color:#666; font-size: 13px; }
+    .error { color:#b00020; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <strong>🔐 Générateur de JSON chiffré (à copier dans /data/&lt;id&gt;.json)</strong>
+      <p class="hint">Tout est chiffré localement dans ton navigateur (WebCrypto). Ne colle jamais le texte en clair dans GitHub.</p>
 
+      <div class="row">
+        <div>
+          <label>Id (nom de fichier) — ex: secret-123</label>
+          <input id="docId" value="secret-123" />
+        </div>
+        <div>
+          <label>Itérations PBKDF2 (recommandé: 210000)</label>
+          <input id="iters" type="number" value="210000" />
+        </div>
+      </div>
+
+      <label>Mot de passe</label>
+      <input id="pw" type="password" autocomplete="new-password" placeholder="Une phrase de passe longue" />
+
+      <label>Contenu (texte / markdown)</label>
+      <textarea id="plain" placeholder="Colle ton contenu secret ici..."></textarea>
+
+      <div style="margin-top:12px" class="row">
+        <div><button id="encryptBtn">Chiffrer</button></div>
+        <div><button id="copyBtn" disabled>Copier le JSON</button></div>
+      </div>
+
+      <p id="msg" class="hint"></p>
+      <p id="err" class="error"></p>
+    </div>
+
+    <div class="card">
+      <strong>Sortie JSON</strong>
+      <textarea id="out" readonly placeholder="Le JSON apparaîtra ici..."></textarea>
+      <p class="hint">Tu vas copier-coller ce JSON dans GitHub → data/&lt;id&gt;.json</p>
+    </div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function bytesToB64(bytes) {
+  let bin = "";
+  const arr = new Uint8Array(bytes);
+  for (let i=0;i<arr.length;i++) bin += String.fromCharCode(arr[i]);
+  return btoa(bin);
+}
+
+async function deriveKey(password, salt, iterations) {
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    { name: "PBKDF2" },
+    false,
+    ["deriveKey"]
+  );
+
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt"]
+  );
+}
+
+$("encryptBtn").addEventListener("click", async () => {
+  $("err").textContent = "";
+  $("msg").textContent = "";
+  $("out").value = "";
+  $("copyBtn").disabled = true;
+
+  const docId = $("docId").value.trim();
+  const pw = $("pw").value;
+  const plain = $("plain").value;
+  const iterations = Number($("iters").value);
+
+  if (!docId) return $("err").textContent = "Id manquant.";
+  if (!pw) return $("err").textContent = "Mot de passe manquant.";
+  if (!plain) return $("err").textContent = "Contenu vide.";
+  if (!Number.isFinite(iterations) || iterations < 10000) return $("err").textContent = "Itérations invalides.";
+
+  try {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(pw, salt, iterations);
+
+    const ptBytes = new TextEncoder().encode(plain);
+    const ctBuffer = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, ptBytes);
+    const ct = new Uint8Array(ctBuffer);
+
+    const payload = {
+      kdf: { name: "PBKDF2", hash: "SHA-256", iterations, salt: bytesToB64(salt) },
+      enc: { name: "AES-GCM", iv: bytesToB64(iv) },
+      ciphertext: bytesToB64(ct)
+    };
+
+    const json = JSON.stringify(payload, null, 2);
+    $("out").value = json;
+    $("copyBtn").disabled = false;
+    $("msg").textContent = `OK. Crée maintenant GitHub: data/${docId}.json (copie-colle la sortie).`;
+  } catch (e) {
+    $("err").textContent = "Erreur de chiffrement: " + (e?.message || e);
+  }
+});
+
+$("copyBtn").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("out").value);
+    $("msg").textContent = "JSON copié ✅";
+  } catch {
+    $("msg").textContent = "Copie manuelle: Ctrl/Cmd+A puis Ctrl/Cmd+C";
+  }
+});
+</script>
+</body>
+</html>
