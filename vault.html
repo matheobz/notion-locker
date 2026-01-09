@@ -1,1 +1,180 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Vault</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; }
+    .wrap { padding: 16px; }
+    .card { border: 1px solid #e5e5e5; border-radius: 14px; padding: 14px; }
+    .row { display:flex; gap: 8px; align-items:center; flex-wrap:wrap; }
+    input[type="password"]{ padding:10px 12px; border:1px solid #ddd; border-radius:10px; min-width: 220px; }
+    button { padding:10px 12px; border:1px solid #ddd; border-radius:10px; background:#fff; cursor:pointer; }
+    button:hover { background:#f7f7f7; }
+    .hint { color:#666; font-size: 13px; margin-top: 8px; }
+    .error { color:#b00020; font-size: 13px; margin-top: 8px; }
+    pre { white-space: pre-wrap; word-wrap: break-word; margin: 0; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom: 10px; }
+    .badge { font-size: 12px; color:#555; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card" id="locked">
+      <div class="topbar">
+        <strong>🔒 Contenu protégé</strong>
+        <span class="badge" id="docIdBadge"></span>
+      </div>
 
+      <div class="row">
+        <input id="pw" type="password" placeholder="Mot de passe" autocomplete="current-password" />
+        <button id="unlockBtn">Déverrouiller</button>
+      </div>
+
+      <div class="hint">
+        Ce coffre ne stocke pas le mot de passe. Il sera demandé à chaque chargement.
+      </div>
+      <div class="error" id="err" style="display:none;"></div>
+    </div>
+
+    <div class="card" id="unlocked" style="display:none;">
+      <div class="topbar">
+        <strong>✅ Déverrouillé</strong>
+        <button id="lockBtn">Reverrouiller</button>
+      </div>
+      <pre id="content"></pre>
+      <div class="hint">Astuce : ça se reverrouille automatiquement si tu changes d’onglet.</div>
+    </div>
+  </div>
+
+<script>
+/**
+ * JSON attendu (base64):
+ * {
+ *   "kdf": {"name":"PBKDF2","hash":"SHA-256","iterations":210000,"salt":"...b64..."},
+ *   "enc": {"name":"AES-GCM","iv":"...b64..."},
+ *   "ciphertext":"...b64..."
+ * }
+ */
+
+const $ = (id) => document.getElementById(id);
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i=0; i<bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function bytesToText(bytes) {
+  return new TextDecoder().decode(bytes);
+}
+
+async function deriveKey(password, saltBytes, iterations) {
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    { name: "PBKDF2" },
+    false,
+    ["deriveKey"]
+  );
+
+  return crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: saltBytes,
+      iterations,
+      hash: "SHA-256"
+    },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["decrypt"]
+  );
+}
+
+async function decryptPayload(payload, password) {
+  const salt = b64ToBytes(payload.kdf.salt);
+  const iv = b64ToBytes(payload.enc.iv);
+  const ct = b64ToBytes(payload.ciphertext);
+
+  const key = await deriveKey(password, salt, payload.kdf.iterations);
+
+  const ptBuffer = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv },
+    key,
+    ct
+  );
+
+  return bytesToText(new Uint8Array(ptBuffer));
+}
+
+// Choix du document via hash: #id=secret-123
+function getDocId() {
+  const hash = location.hash.startsWith("#") ? location.hash.slice(1) : "";
+  const params = new URLSearchParams(hash);
+  return params.get("id") || "default";
+}
+
+const docId = getDocId();
+$("docIdBadge").textContent = `id: ${docId}`;
+
+async function loadEncryptedJson(id) {
+  const url = `./data/${encodeURIComponent(id)}.json`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(`Impossible de charger ${url} (${res.status})`);
+  return res.json();
+}
+
+let encryptedPayload = null;
+
+(async () => {
+  try {
+    encryptedPayload = await loadEncryptedJson(docId);
+  } catch (e) {
+    $("err").style.display = "block";
+    $("err").textContent = "Erreur: " + e.message;
+  }
+})();
+
+$("unlockBtn").addEventListener("click", async () => {
+  $("err").style.display = "none";
+  const pw = $("pw").value;
+
+  if (!encryptedPayload) {
+    $("err").style.display = "block";
+    $("err").textContent = "Le contenu chiffré n’est pas chargé.";
+    return;
+  }
+  if (!pw) return;
+
+  try {
+    const plaintext = await decryptPayload(encryptedPayload, pw);
+    $("content").textContent = plaintext;
+
+    $("locked").style.display = "none";
+    $("unlocked").style.display = "block";
+    $("pw").value = "";
+  } catch (e) {
+    $("err").style.display = "block";
+    $("err").textContent = "Mot de passe incorrect (ou données corrompues).";
+  }
+});
+
+function lockNow() {
+  $("content").textContent = "";
+  $("unlocked").style.display = "none";
+  $("locked").style.display = "block";
+  $("err").style.display = "none";
+}
+
+$("lockBtn").addEventListener("click", lockNow);
+
+// relock si l’embed perd le focus
+window.addEventListener("blur", () => {
+  if ($("unlocked").style.display !== "none") lockNow();
+});
+</script>
+</body>
+</html>
